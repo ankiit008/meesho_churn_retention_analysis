@@ -1,0 +1,77 @@
+
+version: 1.0.0
+databases:
+  - database_name: Churn Analytics (Postgres)
+    sqlalchemy_uri: postgresql+psycopg2://user:pass@localhost:5432/churndb
+
+datasets:
+  - table_name: customers
+    database: Churn Analytics (Postgres)
+    schema: public
+  - table_name: orders
+    database: Churn Analytics (Postgres)
+    schema: public
+  - table_name: sessions
+    database: Churn Analytics (Postgres)
+    schema: public
+
+dashboards:
+  - dashboard_title: Customer Retention & Churn
+    description: Retention cohorts, churn KPIs, and RFM insights.
+    position:
+      CHART-CHURN-RATE:
+        type: CHART
+        meta: { width: 8, height: 12 }
+      CHART-COHORT-HEAT:
+        type: CHART
+        meta: { width: 16, height: 18 }
+      CHART-RFM-MONETARY:
+        type: CHART
+        meta: { width: 8, height: 12 }
+    charts:
+      - slice_name: Monthly Churn Rate
+        viz_type: line
+        params:
+          datasource: customers
+          time_range: No filter
+          metrics:
+            - expressionType: SQL
+              label: churn_rate
+              sqlExpression: "AVG(CASE WHEN churn_label=1 THEN 1.0 ELSE 0.0 END)"
+          groupby: ["DATE_TRUNC('month', to_timestamp(reference_date,'YYYY-MM-DD'))"]
+      - slice_name: Cohort Heatmap (Signup vs Months Since First Order)
+        viz_type: pivot_table_v2
+        params:
+          datasource: orders
+          metrics: ["COUNT_DISTINCT(customer_id)"]
+          groupbyColumns: ["DATE_TRUNC('month', order_date)"]
+          groupbyRows: ["DATE_TRUNC('month', signup_date)"]
+          aggregateFunction: "Sum"
+          rowTotals: false
+      - slice_name: RFM – Monetary by Frequency
+        viz_type: scatter
+        params:
+          datasource: orders
+          metrics: []
+          x: "COUNT(order_id)"
+          y: "SUM(gmv)"
+          series: ["customer_id"]
+
+# --- Extra metric & chart for LTV by Acquisition Channel ---
+metrics:
+  - dataset: orders
+    name: avg_ltv
+    expression: "SUM(gmv) / NULLIF(COUNT(DISTINCT customer_id),0)"
+    description: "Average lifetime value (GMV per customer)"
+dashboards:
+  - dashboard_title: Customer Retention & Churn
+    charts:
+      - slice_name: LTV by Acquisition Channel
+        viz_type: bar
+        params:
+          datasource: orders
+          metrics:
+            - expressionType: SQL
+              label: avg_ltv
+              sqlExpression: "SUM(gmv) / NULLIF(COUNT(DISTINCT customer_id),0)"
+          groupby: ["acq_channel"]

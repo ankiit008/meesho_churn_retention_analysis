@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "name": "Churn Dashboard (Filtered)",
+  "description": "Filterable dashboard for churn, cohorts, and LTV.",
+  "cards": [
+    {
+      "name": "Churn Rate by Month (Filtered)",
+      "display": "line",
+      "dataset_query": {
+        "type": "native",
+        "native": {
+          "query": "\nSELECT DATE_TRUNC('month', TO_DATE(reference_date,'YYYY-MM-DD')) AS month,\n       AVG(CASE WHEN churn_label=1 THEN 1.0 ELSE 0.0 END) AS churn_rate\nFROM customers\nWHERE ({{city_tier}} IS NULL OR city_tier = {{city_tier}})\n  AND ({{acq_channel}} IS NULL OR acq_channel = {{acq_channel}})\nGROUP BY 1\nORDER BY 1;\n",
+          "template-tags": {
+            "city_tier": {
+              "type": "text",
+              "name": "city_tier",
+              "display-name": "City Tier"
+            },
+            "acq_channel": {
+              "type": "text",
+              "name": "acq_channel",
+              "display-name": "Acquisition Channel"
+            }
+          }
+        },
+        "database": 1
+      }
+    },
+    {
+      "name": "LTV by Acquisition Channel (Filtered)",
+      "display": "bar",
+      "dataset_query": {
+        "type": "native",
+        "native": {
+          "query": "\nSELECT acq_channel,\n       SUM(gmv)/NULLIF(COUNT(DISTINCT o.customer_id),0) AS avg_ltv\nFROM orders o\nJOIN customers c ON c.customer_id = o.customer_id\nWHERE ({{city_tier}} IS NULL OR c.city_tier = {{city_tier}})\nGROUP BY acq_channel\nORDER BY avg_ltv DESC;\n",
+          "template-tags": {
+            "city_tier": {
+              "type": "text",
+              "name": "city_tier",
+              "display-name": "City Tier"
+            }
+          }
+        },
+        "database": 1
+      }
+    },
+    {
+      "name": "Cohort Heat (Filtered)",
+      "display": "heatmap",
+      "dataset_query": {
+        "type": "native",
+        "native": {
+          "query": "\nWITH o AS (\n  SELECT o.customer_id,\n         DATE_TRUNC('month', o.order_date) AS order_month,\n         c.acq_channel,\n         c.city_tier\n  FROM orders o\n  JOIN customers c ON c.customer_id = o.customer_id\n  WHERE ({{city_tier}} IS NULL OR c.city_tier = {{city_tier}})\n    AND ({{acq_channel}} IS NULL OR c.acq_channel = {{acq_channel}})\n),\nf AS (\n  SELECT customer_id, MIN(order_month) AS first_order_month\n  FROM o GROUP BY 1\n),\nc AS (\n  SELECT o.customer_id, o.order_month, f.first_order_month,\n         (EXTRACT(YEAR FROM o.order_month)*12 + EXTRACT(MONTH FROM o.order_month))\n         - (EXTRACT(YEAR FROM f.first_order_month)*12 + EXTRACT(MONTH FROM f.first_order_month)) AS cohort_idx\n  FROM o JOIN f USING(customer_id)\n)\nSELECT first_order_month AS cohort_month, cohort_idx, COUNT(DISTINCT customer_id) AS active_users\nFROM c\nGROUP BY 1,2\nORDER BY 1,2;\n",
+          "template-tags": {
+            "city_tier": {
+              "type": "text",
+              "name": "city_tier",
+              "display-name": "City Tier"
+            },
+            "acq_channel": {
+              "type": "text",
+              "name": "acq_channel",
+              "display-name": "Acquisition Channel"
+            }
+          }
+        },
+        "database": 1
+      }
+    }
+  ]
+}

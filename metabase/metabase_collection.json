@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "name": "Churn Analytics",
+  "description": "Cards for churn rate, cohort heatmap, and RFM insights",
+  "cards": [
+    {
+      "name": "Monthly Churn Rate",
+      "display": "line",
+      "dataset_query": {
+        "type": "native",
+        "native": {
+          "query": "\nSELECT DATE_TRUNC('month', TO_DATE(reference_date,'YYYY-MM-DD')) AS month,\n       AVG(CASE WHEN churn_label=1 THEN 1.0 ELSE 0.0 END) AS churn_rate\nFROM customers\nGROUP BY 1\nORDER BY 1;\n"
+        },
+        "database": 1
+      }
+    },
+    {
+      "name": "Cohort Heatmap (Signup vs Order Month)",
+      "display": "heatmap",
+      "dataset_query": {
+        "type": "native",
+        "native": {
+          "query": "\nWITH o AS (\n  SELECT customer_id,\n         DATE_TRUNC('month', order_date) AS order_month\n  FROM orders\n),\nf AS (\n  SELECT customer_id, MIN(order_month) AS first_order_month\n  FROM o\n  GROUP BY 1\n),\nc AS (\n  SELECT o.customer_id, o.order_month, f.first_order_month,\n         (EXTRACT(YEAR FROM o.order_month)*12 + EXTRACT(MONTH FROM o.order_month))\n         - (EXTRACT(YEAR FROM f.first_order_month)*12 + EXTRACT(MONTH FROM f.first_order_month)) AS cohort_idx\n  FROM o JOIN f USING(customer_id)\n)\nSELECT first_order_month AS cohort_month, cohort_idx, COUNT(DISTINCT customer_id) AS active_users\nFROM c\nGROUP BY 1,2\nORDER BY 1,2;\n"
+        },
+        "database": 1
+      }
+    },
+    {
+      "name": "RFM \u2013 Monetary vs Frequency",
+      "display": "scatter",
+      "dataset_query": {
+        "type": "native",
+        "native": {
+          "query": "\nSELECT customer_id,\n       COUNT(order_id) AS frequency,\n       SUM(gmv) AS monetary\nFROM orders\nGROUP BY customer_id;\n"
+        },
+        "database": 1
+      }
+    }
+  ]
+}
