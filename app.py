@@ -1,4 +1,4 @@
-# app.py  — Customer Retention & Churn Analysis (robust version)
+# app.py — Customer Retention & Churn Analysis (robust build)
 
 import os
 from pathlib import Path
@@ -207,7 +207,7 @@ c4.metric("Churn Rate", f"{churn_rate:.1f}%")
 
 st.divider()
 
-# ------------------------ Cohort retention (safe Int64) ------------------------
+# ------------------------ Cohort retention (final safe version) ------------------------
 
 st.subheader("Cohort Retention (signup month × months since first order)")
 
@@ -224,10 +224,10 @@ else:
         first = o.groupby("customer_id")["order_month"].min().rename("first_order_month")
         o = o.merge(first, on="customer_id", how="left")
 
-        # Months since first order — allow missing using nullable Int64, then drop NAs
-        idx = (pd.PeriodIndex(o["order_month"], freq="M") -
-               pd.PeriodIndex(o["first_order_month"], freq="M"))
-        o["cohort_idx"] = pd.Series(idx).astype("Int64")
+        # Months since first order — convert to numeric safely, drop bad rows, cast to int
+        idx = (pd.PeriodIndex(o["order_month"], freq="M")
+               - pd.PeriodIndex(o["first_order_month"], freq="M"))
+        o["cohort_idx"] = pd.to_numeric(pd.Series(idx), errors="coerce")
         o = o[o["cohort_idx"].notna()].copy()
         o["cohort_idx"] = o["cohort_idx"].astype(int)
 
