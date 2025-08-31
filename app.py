@@ -213,39 +213,68 @@ if customers["signup_date"].isna().any() and {"customer_id", "order_date"}.issub
     customers["signup_date"] = customers["signup_date"].fillna(customers["first_order_date"])
     customers.drop(columns=["first_order_date"], inplace=True, errors="ignore")
 
-# ------------------------ Cohort retention (safe) ------------------------
+# ------------------------ Cohort retention (bulletproof) ------------------------
 
 st.subheader("Cohort Retention (signup month × months since first order)")
 
-if orders.empty or "customer_id" not in orders.columns or "order_date" not in orders.columns:
+if orders.empty or not {"customer_id", "order_date"}.issubset(orders.columns):
     st.info("No orders in the selected window. Adjust the date range or data source to see cohorts.")
 else:
-    o = orders.merge(customers[["customer_id", "signup_date"]], on="customer_id", how="inner")
-    o["cohort_month"] = o["signup_date"].dt.to_period("M").astype(str)
-    o["order_month"]  = o["order_date"].dt.to_period("M").astype(str)
+    # 1) Start from what we have
+    df_orders = orders[["customer_id", "order_date"]].dropna().copy()
+    df_orders["order_month"] = df_orders["order_date"].dt.to_period("M").astype(str)
 
-    first = o.groupby("customer_id")["order_month"].min().rename("first_order_month")
-    o = o.merge(first, on="customer_id", how="left")
+    # 2) Try to use customers.signup_date if usable
+    use_signup = ("signup_date" in customers.columns) and (customers["signup_date"].notna().any())
+    if use_signup:
+        cust_slim = customers[["customer_id", "signup_date"]].copy()
+        cust_slim["signup_date"] = pd.to_datetime(cust_slim["signup_date"], errors="coerce")
+        use_signup = cust_slim["signup_date"].notna().any()
 
-    # Months since first order — convert safely, drop bad rows, cast to int
-    idx = (pd.PeriodIndex(o["order_month"], freq="M") - pd.PeriodIndex(o["first_order_month"], freq="M"))
-    o["cohort_idx"] = pd.to_numeric(pd.Series(idx), errors="coerce")
-    o = o[o["cohort_idx"].notna()].copy()
-    o["cohort_idx"] = o["cohort_idx"].astype(int)
+    if use_signup:
+        df = df_orders.merge(cust_slim, on="customer_id", how="left")
+        df["cohort_month"] = df["signup_date"].dt.to_period("M").astype(str)
+    else:
+        # 3) Fallback: build cohorts from first observed order per customer
+        first_order = df_orders.groupby("customer_id")["order_date"].min().rename("first_order_date").reset_index()
+        df = df_orders.merge(first_order, on="customer_id", how="left")
+        df["cohort_month"] = df["first_order_date"].dt.to_period("M").astype(str)
 
-    ret = (o.groupby(["cohort_month", "cohort_idx"])["customer_id"]
+    # 4) First order month for index (months since first order)
+    first_order_month = df.groupby("customer_id")["order_month"].min().rename("first_order_month").reset_index()
+    df = df.merge(first_order_month, on="customer_id", how="left")
+
+    # 5) Safe numeric diff for cohort index
+    idx = (pd.PeriodIndex(df["order_month"], freq="M") - pd.PeriodIndex(df["first_order_month"], freq="M"))
+    df["cohort_idx"] = pd.to_numeric(pd.Series(idx), errors="coerce")
+    df = df[df["cohort_idx"].notna()].copy()
+    df["cohort_idx"] = df["cohort_idx"].astype(int)
+
+    # 6) Aggregate retention
+    ret = (df.groupby(["cohort_month", "cohort_idx"])["customer_id"]
              .nunique()
              .reset_index(name="active_users"))
-    base = (o.groupby("cohort_month")["customer_id"]
+    base = (df.groupby("cohort_month")["customer_id"]
               .nunique()
               .reset_index(name="cohort_size"))
     ret = ret.merge(base, on="cohort_month", how="left")
     ret["retention_rate"] = ret["active_users"] / ret["cohort_size"].replace({0: np.nan})
 
+    # 7) Pivot; if still empty, show hint
     pivot = (ret.pivot(index="cohort_month", columns="cohort_idx", values="retention_rate")
                .fillna(0)
                .round(3))
-    st.dataframe(pivot.style.background_gradient(cmap="Greens"), use_container_width=True)
+    if pivot.empty:
+        st.info("No cohort grid for this filter combination. Try widening the date window or clearing filters.")
+    else:
+        st.dataframe(pivot.style.background_gradient(cmap="Greens"), use_container_width=True)
+
+    # Optional small debug (you can comment out later)
+    st.caption(
+        f"Cohort debug — orders: {len(df_orders):,}, customers: {customers['customer_id'].nunique() if 'customer_id' in customers.columns else 0:,}, "
+        f"cohort months: {pivot.shape[0]}, max index: {pivot.columns.max() if len(pivot.columns) else '—'}"
+    )
+
 
 st.divider()
 
