@@ -40,25 +40,35 @@ customers = customers[customers["city_tier"].isin(tiers) & customers["acq_channe
 orders = orders[orders["order_date"].between(pd.to_datetime(window[0]), pd.to_datetime(window[1]))]
 sessions = sessions[sessions["session_date"].between(pd.to_datetime(window[0]), pd.to_datetime(window[1]))]
 
-# KPIs
+# ---------- KPIs (robust to empty orders / missing last_order_date) ----------
 active = orders["customer_id"].nunique()
 total = customers["customer_id"].nunique()
-gmv = orders["gmv"].sum()
-avg_ord = orders.groupby("customer_id")["order_id"].count().mean() if active>0 else 0
+gmv = float(orders["gmv"].sum()) if not orders.empty else 0.0
 
 ref_date = pd.to_datetime(window[1])
-last = orders.sort_values("order_date").groupby("customer_id")["order_date"].last()
-cust = customers.merge(last.rename("last_order_date"), on="customer_id", how="left")
+
+# Build cust with a safe last_order_date
+# (works even if orders is empty or column doesn't exist yet)
+last = (
+    orders.groupby("customer_id")["order_date"].max()
+    if not orders.empty else pd.Series(dtype="datetime64[ns]")
+).rename("last_order_date")
+
+cust = customers.merge(last, on="customer_id", how="left")
+cust["last_order_date"] = pd.to_datetime(cust["last_order_date"], errors="coerce")
+
 cust["days_since_last"] = (ref_date - cust["last_order_date"]).dt.days
 cust["days_since_last"] = cust["days_since_last"].fillna(9999)
 cust["churn_label"] = (cust["days_since_last"] > 60).astype(int)
-churn_rate = 100*cust["churn_label"].mean()
 
-c1,c2,c3,c4 = st.columns(4)
+churn_rate = 100 * cust["churn_label"].mean()
+
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Customers", f"{total:,}")
 c2.metric("Active Customers", f"{active:,}")
 c3.metric("GMV in Window (₹)", f"{gmv:,.0f}")
 c4.metric("Churn Rate", f"{churn_rate:.1f}%")
+
 
 st.divider()
 
