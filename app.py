@@ -1,4 +1,4 @@
-# app.py — Customer Retention & Churn Analysis (stable build)
+# app.py — Customer Retention & Churn Analysis (stable build, all fixes)
 
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-# Optional warehouse deps
+# Optional warehouses (not required for CSV/upload)
 try:
     from sqlalchemy import create_engine, text as sa_text
 except Exception:
@@ -25,13 +25,29 @@ except Exception:
     gbq_read = None
 
 
+# ------------------------ App setup ------------------------
 APP_DIR = Path(__file__).parent
 st.set_page_config(page_title="Customer Retention & Churn", layout="wide")
 st.title("🧲 Customer Retention & Churn Analysis")
 st.caption("Cohort retention tables + RFM features + churn prediction. Supports CSV, uploads, Postgres, and BigQuery.")
 
-# ------------------------ Data loaders ------------------------
 
+# ------------------------ Helpers ------------------------
+def _normalize_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce IDs to consistent string keys so merges work reliably."""
+    if "customer_id" in df.columns:
+        df["customer_id"] = df["customer_id"].astype(str).str.strip()
+    if "order_id" in df.columns:
+        df["order_id"] = df["order_id"].astype(str).str.strip()
+    return df
+
+def to_dt(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+# ------------------------ Data loaders ------------------------
 @st.cache_data
 def load_local_csv(name: str) -> pd.DataFrame:
     path = APP_DIR / name
@@ -60,10 +76,12 @@ def load_bigquery(project: str, dataset: str, t_c="customers", t_o="orders", t_s
     sess = gbq_read(q(t_s), project_id=project)
     return cust, orders, sess
 
-# ------------------------ Sidebar source ------------------------
 
+# ------------------------ Sidebar: choose source ------------------------
 st.sidebar.header("Data Source")
-source = st.sidebar.selectbox("Choose dataset", ["Sample (CSV)", "Upload CSVs", "Postgres", "BigQuery"], index=0)
+source = st.sidebar.selectbox(
+    "Choose dataset", ["Sample (CSV)", "Upload CSVs", "Postgres", "BigQuery"], index=0
+)
 
 customers = orders = sessions = None
 
@@ -103,23 +121,23 @@ elif source == "BigQuery":
         st.stop()
     customers, orders, sessions = load_bigquery(project, dataset, t_c, t_o, t_s)
 
+# Guard
 if customers is None or orders is None or sessions is None:
     st.warning("Provide all three datasets (customers, orders, sessions).")
     st.stop()
 
-# ------------------------ Normalize and parse dates ------------------------
+# Normalize IDs ASAP (critical for merges)
+customers = _normalize_ids(customers)
+orders    = _normalize_ids(orders)
+sessions  = _normalize_ids(sessions)
 
-def to_dt(df, col):
-    if col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
-    return df
-
+# Parse dates
 customers = to_dt(customers, "signup_date")
 orders    = to_dt(orders, "order_date")
 sessions  = to_dt(sessions, "session_date")
 
-# ------------------------ Filters ------------------------
 
+# ------------------------ Filters ------------------------
 def _date_range_defaults():
     if not orders.empty and "order_date" in orders.columns:
         return orders["order_date"].min().date(), orders["order_date"].max().date()
@@ -150,8 +168,17 @@ if not orders.empty and "order_date" in orders.columns:
 if not sessions.empty and "session_date" in sessions.columns:
     sessions = sessions[sessions["session_date"].between(start_date, end_date)]
 
-# ------------------------ KPIs (robust) ------------------------
+# Keep orders/sessions aligned to the current customer subset
+if "customer_id" in customers.columns and "customer_id" in orders.columns:
+    cust_ids = set(customers["customer_id"].unique())
+    orders = orders[orders["customer_id"].isin(cust_ids)].copy()
 
+if "customer_id" in customers.columns and "customer_id" in sessions.columns:
+    sess_ids = set(customers["customer_id"].unique())
+    sessions = sessions[sessions["customer_id"].isin(sess_ids)].copy()
+
+
+# ------------------------ KPIs (robust) ------------------------
 # Realistic reference date to avoid fake 100% churn
 latest_order = (
     orders["order_date"].max()
@@ -195,8 +222,8 @@ c4.metric("Churn Rate", f"{churn_rate:.1f}%")
 
 st.divider()
 
-# ------------------------ Ensure signup_date for cohorts ------------------------
 
+# ------------------------ Ensure signup_date for cohorts ------------------------
 # Derive signup_date from first order if missing / blank
 if "signup_date" not in customers.columns or customers["signup_date"].isna().all():
     if {"customer_id", "order_date"}.issubset(orders.columns) and not orders.empty:
@@ -213,18 +240,18 @@ if customers["signup_date"].isna().any() and {"customer_id", "order_date"}.issub
     customers["signup_date"] = customers["signup_date"].fillna(customers["first_order_date"])
     customers.drop(columns=["first_order_date"], inplace=True, errors="ignore")
 
-# ------------------------ Cohort retention (bulletproof) ------------------------
 
+# ------------------------ Cohort retention (bulletproof) ------------------------
 st.subheader("Cohort Retention (signup month × months since first order)")
 
 if orders.empty or not {"customer_id", "order_date"}.issubset(orders.columns):
     st.info("No orders in the selected window. Adjust the date range or data source to see cohorts.")
 else:
-    # 1) Start from what we have
+    # 1) From orders currently aligned to customers
     df_orders = orders[["customer_id", "order_date"]].dropna().copy()
     df_orders["order_month"] = df_orders["order_date"].dt.to_period("M").astype(str)
 
-    # 2) Try to use customers.signup_date if usable
+    # 2) Prefer true signup_date if available
     use_signup = ("signup_date" in customers.columns) and (customers["signup_date"].notna().any())
     if use_signup:
         cust_slim = customers[["customer_id", "signup_date"]].copy()
@@ -235,22 +262,21 @@ else:
         df = df_orders.merge(cust_slim, on="customer_id", how="left")
         df["cohort_month"] = df["signup_date"].dt.to_period("M").astype(str)
     else:
-        # 3) Fallback: build cohorts from first observed order per customer
+        # 3) Fallback: derive cohorts from first observed order
         first_order = df_orders.groupby("customer_id")["order_date"].min().rename("first_order_date").reset_index()
         df = df_orders.merge(first_order, on="customer_id", how="left")
         df["cohort_month"] = df["first_order_date"].dt.to_period("M").astype(str)
 
-    # 4) First order month for index (months since first order)
+    # 4) Months since first order
     first_order_month = df.groupby("customer_id")["order_month"].min().rename("first_order_month").reset_index()
     df = df.merge(first_order_month, on="customer_id", how="left")
 
-    # 5) Safe numeric diff for cohort index
     idx = (pd.PeriodIndex(df["order_month"], freq="M") - pd.PeriodIndex(df["first_order_month"], freq="M"))
     df["cohort_idx"] = pd.to_numeric(pd.Series(idx), errors="coerce")
     df = df[df["cohort_idx"].notna()].copy()
     df["cohort_idx"] = df["cohort_idx"].astype(int)
 
-    # 6) Aggregate retention
+    # 5) Retention matrix
     ret = (df.groupby(["cohort_month", "cohort_idx"])["customer_id"]
              .nunique()
              .reset_index(name="active_users"))
@@ -260,7 +286,6 @@ else:
     ret = ret.merge(base, on="cohort_month", how="left")
     ret["retention_rate"] = ret["active_users"] / ret["cohort_size"].replace({0: np.nan})
 
-    # 7) Pivot; if still empty, show hint
     pivot = (ret.pivot(index="cohort_month", columns="cohort_idx", values="retention_rate")
                .fillna(0)
                .round(3))
@@ -269,17 +294,16 @@ else:
     else:
         st.dataframe(pivot.style.background_gradient(cmap="Greens"), use_container_width=True)
 
-    # Optional small debug (you can comment out later)
+    # Debug note (optional)
     st.caption(
         f"Cohort debug — orders: {len(df_orders):,}, customers: {customers['customer_id'].nunique() if 'customer_id' in customers.columns else 0:,}, "
         f"cohort months: {pivot.shape[0]}, max index: {pivot.columns.max() if len(pivot.columns) else '—'}"
     )
 
-
 st.divider()
 
-# ------------------------ RFM + churn model ------------------------
 
+# ------------------------ RFM + churn model ------------------------
 st.subheader("Churn Prediction (Logistic Regression)")
 
 if orders.empty or "customer_id" not in orders.columns or "order_date" not in orders.columns:
@@ -313,10 +337,12 @@ else:
         "sessions_30": 0, "minutes_30": 0
     })
 
+    # One-hot for categorical columns (if present)
     for cat in ["city_tier", "acq_channel"]:
         if cat in feat.columns:
             feat = pd.get_dummies(feat, columns=[cat], drop_first=True)
 
+    # Train only when we have signal
     if feat["churn_label"].nunique() < 2 or len(feat) < 50:
         st.info("Not enough data/class balance for training a model. (Need at least two classes and ~50+ rows.)")
     else:
@@ -373,4 +399,4 @@ else:
                 mime="text/csv",
             )
 
-st.caption("Tip: If cohorts look empty, widen the date window or upload larger data. This build auto-derives signup_date from first order when missing.")
+st.caption("Tip: If cohorts look empty, widen the date window or upload larger data. IDs are normalized so merges always match; this build also derives signup_date from first order when missing.")
