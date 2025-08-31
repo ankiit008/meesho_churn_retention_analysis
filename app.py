@@ -1,4 +1,4 @@
-# app.py — Customer Retention & Churn Analysis (robust build)
+# app.py — Customer Retention & Churn Analysis (stable build)
 
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-# Optional warehouse deps (import gently so CSV mode still works)
+# Optional warehouse deps
 try:
     from sqlalchemy import create_engine, text as sa_text
 except Exception:
@@ -28,10 +28,7 @@ except Exception:
 APP_DIR = Path(__file__).parent
 st.set_page_config(page_title="Customer Retention & Churn", layout="wide")
 st.title("🧲 Customer Retention & Churn Analysis")
-st.caption(
-    "Cohort retention tables + RFM features + churn prediction. "
-    "Supports CSV, uploads, Postgres, and BigQuery."
-)
+st.caption("Cohort retention tables + RFM features + churn prediction. Supports CSV, uploads, Postgres, and BigQuery.")
 
 # ------------------------ Data loaders ------------------------
 
@@ -45,7 +42,7 @@ def load_local_csv(name: str) -> pd.DataFrame:
 @st.cache_data
 def load_postgres(db_url: str):
     if create_engine is None:
-        raise RuntimeError("SQLAlchemy not installed. Add to requirements: sqlalchemy psycopg2-binary")
+        raise RuntimeError("Add to requirements: sqlalchemy psycopg2-binary")
     engine = create_engine(db_url, pool_pre_ping=True)
     with engine.begin() as conn:
         cust = pd.read_sql(sa_text("SELECT * FROM customers"), conn)
@@ -56,7 +53,7 @@ def load_postgres(db_url: str):
 @st.cache_data
 def load_bigquery(project: str, dataset: str, t_c="customers", t_o="orders", t_s="sessions"):
     if gbq_read is None:
-        raise RuntimeError("pandas-gbq not installed. Add to requirements: pandas-gbq google-cloud-bigquery")
+        raise RuntimeError("Add to requirements: pandas-gbq google-cloud-bigquery")
     q = lambda t: f"SELECT * FROM `{project}.{dataset}.{t}`"
     cust = gbq_read(q(t_c), project_id=project)
     orders = gbq_read(q(t_o), project_id=project)
@@ -66,9 +63,7 @@ def load_bigquery(project: str, dataset: str, t_c="customers", t_o="orders", t_s
 # ------------------------ Sidebar source ------------------------
 
 st.sidebar.header("Data Source")
-source = st.sidebar.selectbox(
-    "Choose dataset", ["Sample (CSV)", "Upload CSVs", "Postgres", "BigQuery"], index=0
-)
+source = st.sidebar.selectbox("Choose dataset", ["Sample (CSV)", "Upload CSVs", "Postgres", "BigQuery"], index=0)
 
 customers = orders = sessions = None
 
@@ -89,20 +84,15 @@ elif source == "Upload CSVs":
         st.stop()
 
 elif source == "Postgres":
-    st.sidebar.caption("Paste DATABASE_URL (or put in Secrets). e.g. postgresql+psycopg2://user:pass@host:5432/db")
-    db_url = os.getenv("DATABASE_URL", "")
-    db_url = st.sidebar.text_input("DATABASE_URL", db_url, type="password")
+    st.sidebar.caption("Paste DATABASE_URL (e.g. postgresql+psycopg2://user:pass@host:5432/db)")
+    db_url = st.sidebar.text_input("DATABASE_URL", os.getenv("DATABASE_URL", ""), type="password")
     if not db_url:
         st.warning("Enter DATABASE_URL to load data.")
         st.stop()
-    try:
-        customers, orders, sessions = load_postgres(db_url)
-    except Exception as e:
-        st.error(f"Postgres load error: {e}")
-        st.stop()
+    customers, orders, sessions = load_postgres(db_url)
 
 elif source == "BigQuery":
-    st.sidebar.caption("Provide project & dataset (auth via service account JSON in Secrets).")
+    st.sidebar.caption("Provide project & dataset; auth via service account JSON in Secrets.")
     project = st.sidebar.text_input("BQ project", os.getenv("BQ_PROJECT", ""))
     dataset = st.sidebar.text_input("BQ dataset", os.getenv("BQ_DATASET", ""))
     t_c = st.sidebar.text_input("Customers table", os.getenv("BQ_TABLE_CUST", "customers"))
@@ -111,11 +101,7 @@ elif source == "BigQuery":
     if not project or not dataset:
         st.warning("Enter BigQuery project and dataset to proceed.")
         st.stop()
-    try:
-        customers, orders, sessions = load_bigquery(project, dataset, t_c, t_o, t_s)
-    except Exception as e:
-        st.error(f"BigQuery load error: {e}")
-        st.stop()
+    customers, orders, sessions = load_bigquery(project, dataset, t_c, t_o, t_s)
 
 if customers is None or orders is None or sessions is None:
     st.warning("Provide all three datasets (customers, orders, sessions).")
@@ -166,13 +152,21 @@ if not sessions.empty and "session_date" in sessions.columns:
 
 # ------------------------ KPIs (robust) ------------------------
 
+# Realistic reference date to avoid fake 100% churn
+latest_order = (
+    orders["order_date"].max()
+    if ("order_date" in orders.columns and not orders.empty)
+    else end_date
+)
+if pd.isna(latest_order):
+    latest_order = end_date
+ref_date = min(end_date, latest_order)
+
 active_customers = orders["customer_id"].nunique() if "customer_id" in orders.columns else 0
 total_customers  = customers["customer_id"].nunique() if "customer_id" in customers.columns else 0
 gmv_sum = float(orders["gmv"].sum()) if "gmv" in orders.columns else 0.0
 
-ref_date = end_date
-
-# Build last_order_date safely
+# last_order_date per customer
 if not orders.empty and {"customer_id", "order_date"}.issubset(orders.columns):
     last = orders.groupby("customer_id")["order_date"].max().rename("last_order_date")
 else:
@@ -184,14 +178,8 @@ if "customer_id" in cust.columns:
 else:
     cust["last_order_date"] = pd.NaT
 
-# Normalize odd cases
 if "last_order_date" not in cust.columns:
-    if "order_date" in cust.columns:
-        cust = cust.rename(columns={"order_date": "last_order_date"})
-    elif 0 in cust.columns:
-        cust = cust.rename(columns={0: "last_order_date"})
-    else:
-        cust["last_order_date"] = pd.NaT
+    cust["last_order_date"] = pd.NaT
 
 cust["last_order_date"] = pd.to_datetime(cust["last_order_date"], errors="coerce")
 cust["days_since_last"] = (ref_date - cust["last_order_date"]).dt.days
@@ -207,44 +195,57 @@ c4.metric("Churn Rate", f"{churn_rate:.1f}%")
 
 st.divider()
 
-# ------------------------ Cohort retention (final safe version) ------------------------
+# ------------------------ Ensure signup_date for cohorts ------------------------
+
+# Derive signup_date from first order if missing / blank
+if "signup_date" not in customers.columns or customers["signup_date"].isna().all():
+    if {"customer_id", "order_date"}.issubset(orders.columns) and not orders.empty:
+        first_order = orders.groupby("customer_id")["order_date"].min().rename("signup_date")
+        customers = customers.drop(columns=[c for c in ["signup_date"] if c in customers.columns], errors="ignore")
+        customers = customers.merge(first_order, on="customer_id", how="left")
+    else:
+        customers["signup_date"] = pd.to_datetime(ref_date, errors="coerce")
+
+customers["signup_date"] = pd.to_datetime(customers["signup_date"], errors="coerce")
+if customers["signup_date"].isna().any() and {"customer_id", "order_date"}.issubset(orders.columns):
+    first_order = orders.groupby("customer_id")["order_date"].min().rename("first_order_date")
+    customers = customers.merge(first_order, on="customer_id", how="left")
+    customers["signup_date"] = customers["signup_date"].fillna(customers["first_order_date"])
+    customers.drop(columns=["first_order_date"], inplace=True, errors="ignore")
+
+# ------------------------ Cohort retention (safe) ------------------------
 
 st.subheader("Cohort Retention (signup month × months since first order)")
 
 if orders.empty or "customer_id" not in orders.columns or "order_date" not in orders.columns:
     st.info("No orders in the selected window. Adjust the date range or data source to see cohorts.")
 else:
-    if "signup_date" not in customers.columns:
-        st.info("Missing signup_date in customers; cannot compute cohort. (Check your data schema.)")
-    else:
-        o = orders.merge(customers[["customer_id", "signup_date"]], on="customer_id", how="inner")
-        o["cohort_month"] = o["signup_date"].dt.to_period("M").astype(str)
-        o["order_month"]  = o["order_date"].dt.to_period("M").astype(str)
+    o = orders.merge(customers[["customer_id", "signup_date"]], on="customer_id", how="inner")
+    o["cohort_month"] = o["signup_date"].dt.to_period("M").astype(str)
+    o["order_month"]  = o["order_date"].dt.to_period("M").astype(str)
 
-        first = o.groupby("customer_id")["order_month"].min().rename("first_order_month")
-        o = o.merge(first, on="customer_id", how="left")
+    first = o.groupby("customer_id")["order_month"].min().rename("first_order_month")
+    o = o.merge(first, on="customer_id", how="left")
 
-        # Months since first order — convert to numeric safely, drop bad rows, cast to int
-        idx = (pd.PeriodIndex(o["order_month"], freq="M")
-               - pd.PeriodIndex(o["first_order_month"], freq="M"))
-        o["cohort_idx"] = pd.to_numeric(pd.Series(idx), errors="coerce")
-        o = o[o["cohort_idx"].notna()].copy()
-        o["cohort_idx"] = o["cohort_idx"].astype(int)
+    # Months since first order — convert safely, drop bad rows, cast to int
+    idx = (pd.PeriodIndex(o["order_month"], freq="M") - pd.PeriodIndex(o["first_order_month"], freq="M"))
+    o["cohort_idx"] = pd.to_numeric(pd.Series(idx), errors="coerce")
+    o = o[o["cohort_idx"].notna()].copy()
+    o["cohort_idx"] = o["cohort_idx"].astype(int)
 
-        ret = (o.groupby(["cohort_month", "cohort_idx"])["customer_id"]
-                 .nunique()
-                 .reset_index(name="active_users"))
-        base = (o.groupby("cohort_month")["customer_id"]
-                  .nunique()
-                  .reset_index(name="cohort_size"))
-        ret = ret.merge(base, on="cohort_month", how="left")
-        ret["retention_rate"] = ret["active_users"] / ret["cohort_size"].replace({0: np.nan})
+    ret = (o.groupby(["cohort_month", "cohort_idx"])["customer_id"]
+             .nunique()
+             .reset_index(name="active_users"))
+    base = (o.groupby("cohort_month")["customer_id"]
+              .nunique()
+              .reset_index(name="cohort_size"))
+    ret = ret.merge(base, on="cohort_month", how="left")
+    ret["retention_rate"] = ret["active_users"] / ret["cohort_size"].replace({0: np.nan})
 
-        pivot = (ret.pivot(index="cohort_month", columns="cohort_idx",
-                           values="retention_rate")
-                   .fillna(0)
-                   .round(3))
-        st.dataframe(pivot.style.background_gradient(cmap="Greens"), use_container_width=True)
+    pivot = (ret.pivot(index="cohort_month", columns="cohort_idx", values="retention_rate")
+               .fillna(0)
+               .round(3))
+    st.dataframe(pivot.style.background_gradient(cmap="Greens"), use_container_width=True)
 
 st.divider()
 
@@ -273,7 +274,7 @@ else:
         sess = pd.DataFrame(columns=["customer_id", "sessions_30", "minutes_30"])
 
     feat = cust[["customer_id", "churn_label"]].copy()
-    for col in ["city_tier", "acq_channel", "age"]:  # keep demographics if present
+    for col in ["city_tier", "acq_channel", "age"]:
         if col in cust.columns:
             feat[col] = cust[col]
 
@@ -283,7 +284,6 @@ else:
         "sessions_30": 0, "minutes_30": 0
     })
 
-    # One-hot encoding (only if columns exist)
     for cat in ["city_tier", "acq_channel"]:
         if cat in feat.columns:
             feat = pd.get_dummies(feat, columns=[cat], drop_first=True)
@@ -344,4 +344,4 @@ else:
                 mime="text/csv",
             )
 
-st.caption("Tip: Use at-risk scores to target re-engagement campaigns (e.g., coupons for high-GMV but high-risk users).")
+st.caption("Tip: If cohorts look empty, widen the date window or upload larger data. This build auto-derives signup_date from first order when missing.")
