@@ -1,3 +1,5 @@
+# app.py  — Customer Retention & Churn Analysis (robust version)
+
 import os
 from pathlib import Path
 import numpy as np
@@ -10,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-# Optional warehouse deps (import gently)
+# Optional warehouse deps (import gently so CSV mode still works)
 try:
     from sqlalchemy import create_engine, text as sa_text
 except Exception:
@@ -26,8 +28,10 @@ except Exception:
 APP_DIR = Path(__file__).parent
 st.set_page_config(page_title="Customer Retention & Churn", layout="wide")
 st.title("🧲 Customer Retention & Churn Analysis")
-st.caption("Cohort retention tables + RFM features + churn prediction. Supports CSV, uploads, Postgres, and BigQuery.")
-
+st.caption(
+    "Cohort retention tables + RFM features + churn prediction. "
+    "Supports CSV, uploads, Postgres, and BigQuery."
+)
 
 # ------------------------ Data loaders ------------------------
 
@@ -35,7 +39,6 @@ st.caption("Cohort retention tables + RFM features + churn prediction. Supports 
 def load_local_csv(name: str) -> pd.DataFrame:
     path = APP_DIR / name
     if not path.exists():
-        # return empty DF with expected columns for safety
         return pd.DataFrame()
     return pd.read_csv(path)
 
@@ -59,7 +62,6 @@ def load_bigquery(project: str, dataset: str, t_c="customers", t_o="orders", t_s
     orders = gbq_read(q(t_o), project_id=project)
     sess = gbq_read(q(t_s), project_id=project)
     return cust, orders, sess
-
 
 # ------------------------ Sidebar source ------------------------
 
@@ -87,7 +89,7 @@ elif source == "Upload CSVs":
         st.stop()
 
 elif source == "Postgres":
-    st.sidebar.caption("Paste DATABASE_URL (or put it in Secrets). Example: postgresql+psycopg2://user:pass@host:5432/db")
+    st.sidebar.caption("Paste DATABASE_URL (or put in Secrets). e.g. postgresql+psycopg2://user:pass@host:5432/db")
     db_url = os.getenv("DATABASE_URL", "")
     db_url = st.sidebar.text_input("DATABASE_URL", db_url, type="password")
     if not db_url:
@@ -100,7 +102,7 @@ elif source == "Postgres":
         st.stop()
 
 elif source == "BigQuery":
-    st.sidebar.caption("Provide project & dataset. Use service account JSON in Streamlit Secrets for auth.")
+    st.sidebar.caption("Provide project & dataset (auth via service account JSON in Secrets).")
     project = st.sidebar.text_input("BQ project", os.getenv("BQ_PROJECT", ""))
     dataset = st.sidebar.text_input("BQ dataset", os.getenv("BQ_DATASET", ""))
     t_c = st.sidebar.text_input("Customers table", os.getenv("BQ_TABLE_CUST", "customers"))
@@ -115,7 +117,6 @@ elif source == "BigQuery":
         st.error(f"BigQuery load error: {e}")
         st.stop()
 
-# If any dataset is still None, stop early
 if customers is None or orders is None or sessions is None:
     st.warning("Provide all three datasets (customers, orders, sessions).")
     st.stop()
@@ -163,7 +164,6 @@ if not orders.empty and "order_date" in orders.columns:
 if not sessions.empty and "session_date" in sessions.columns:
     sessions = sessions[sessions["session_date"].between(start_date, end_date)]
 
-
 # ------------------------ KPIs (robust) ------------------------
 
 active_customers = orders["customer_id"].nunique() if "customer_id" in orders.columns else 0
@@ -182,13 +182,13 @@ cust = customers.copy()
 if "customer_id" in cust.columns:
     cust = cust.merge(last, on="customer_id", how="left")
 else:
-    cust["last_order_date"] = pd.NaT  # no customer_id -> still keep columns
+    cust["last_order_date"] = pd.NaT
 
-# Normalize name in any weird cases
+# Normalize odd cases
 if "last_order_date" not in cust.columns:
     if "order_date" in cust.columns:
         cust = cust.rename(columns={"order_date": "last_order_date"})
-    elif 0 in cust.columns:  # unnamed series
+    elif 0 in cust.columns:
         cust = cust.rename(columns={0: "last_order_date"})
     else:
         cust["last_order_date"] = pd.NaT
@@ -207,8 +207,7 @@ c4.metric("Churn Rate", f"{churn_rate:.1f}%")
 
 st.divider()
 
-
-# ------------------------ Cohort retention ------------------------
+# ------------------------ Cohort retention (safe Int64) ------------------------
 
 st.subheader("Cohort Retention (signup month × months since first order)")
 
@@ -221,29 +220,38 @@ else:
         o = orders.merge(customers[["customer_id", "signup_date"]], on="customer_id", how="inner")
         o["cohort_month"] = o["signup_date"].dt.to_period("M").astype(str)
         o["order_month"]  = o["order_date"].dt.to_period("M").astype(str)
+
         first = o.groupby("customer_id")["order_month"].min().rename("first_order_month")
         o = o.merge(first, on="customer_id", how="left")
-        # months since first order
-        o["cohort_idx"] = (
-            pd.PeriodIndex(o["order_month"], freq="M") - pd.PeriodIndex(o["first_order_month"], freq="M")
-        ).astype(int)
 
-        ret = o.groupby(["cohort_month", "cohort_idx"])["customer_id"].nunique().reset_index(name="active_users")
-        base = o.groupby("cohort_month")["customer_id"].nunique().reset_index(name="cohort_size")
+        # Months since first order — allow missing using nullable Int64, then drop NAs
+        idx = (pd.PeriodIndex(o["order_month"], freq="M") -
+               pd.PeriodIndex(o["first_order_month"], freq="M"))
+        o["cohort_idx"] = pd.Series(idx).astype("Int64")
+        o = o[o["cohort_idx"].notna()].copy()
+        o["cohort_idx"] = o["cohort_idx"].astype(int)
+
+        ret = (o.groupby(["cohort_month", "cohort_idx"])["customer_id"]
+                 .nunique()
+                 .reset_index(name="active_users"))
+        base = (o.groupby("cohort_month")["customer_id"]
+                  .nunique()
+                  .reset_index(name="cohort_size"))
         ret = ret.merge(base, on="cohort_month", how="left")
         ret["retention_rate"] = ret["active_users"] / ret["cohort_size"].replace({0: np.nan})
 
-        pivot = ret.pivot(index="cohort_month", columns="cohort_idx", values="retention_rate").fillna(0).round(3)
+        pivot = (ret.pivot(index="cohort_month", columns="cohort_idx",
+                           values="retention_rate")
+                   .fillna(0)
+                   .round(3))
         st.dataframe(pivot.style.background_gradient(cmap="Greens"), use_container_width=True)
 
 st.divider()
-
 
 # ------------------------ RFM + churn model ------------------------
 
 st.subheader("Churn Prediction (Logistic Regression)")
 
-# RFM
 if orders.empty or "customer_id" not in orders.columns or "order_date" not in orders.columns:
     st.info("Not enough orders to compute RFM features.")
 else:
@@ -265,8 +273,7 @@ else:
         sess = pd.DataFrame(columns=["customer_id", "sessions_30", "minutes_30"])
 
     feat = cust[["customer_id", "churn_label"]].copy()
-    # keep demographics if present
-    for col in ["city_tier", "acq_channel", "age"]:
+    for col in ["city_tier", "acq_channel", "age"]:  # keep demographics if present
         if col in cust.columns:
             feat[col] = cust[col]
 
@@ -284,11 +291,9 @@ else:
     if feat["churn_label"].nunique() < 2 or len(feat) < 50:
         st.info("Not enough data/class balance for training a model. (Need at least two classes and ~50+ rows.)")
     else:
-        # Build X, y
         X = feat.drop(columns=["customer_id", "churn_label"])
         y = feat["churn_label"].astype(int)
 
-        # Scale numeric columns safely
         num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
         if not num_cols:
             st.info("No numeric features available for the model.")
@@ -312,7 +317,6 @@ else:
             c1.metric("Accuracy", f"{acc*100:.1f}%")
             c2.metric("ROC AUC", f"{auc:.3f}")
 
-            # Feature importances (coefficients)
             coef = pd.DataFrame({"feature": X.columns, "coef": model.coef_[0]}).sort_values(
                 "coef", key=lambda s: s.abs(), ascending=False
             ).head(12)
@@ -321,7 +325,6 @@ else:
 
             # score all customers
             X_all = feat.drop(columns=["customer_id", "churn_label"]).copy()
-            # Keep only numeric columns (others would have been one-hot encoded)
             X_all[num_cols] = scaler.transform(X_all[num_cols])
             feat["churn_score"] = model.predict_proba(X_all)[:, 1]
 
